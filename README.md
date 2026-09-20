@@ -1,43 +1,78 @@
-# Codex Thread Bridge
+# Codex 任务通信桥
 
-An MCP server that lets existing Codex desktop tasks exchange bounded, labeled messages without starting a competing writer.
+[简体中文](README.md) | [English](README.en.md)
 
-It exposes three tools:
+这是一个 MCP Server，用于让已有的 Codex 桌面任务交换带来源标记、轮数受限的消息，同时避免为同一个任务启动相互竞争的执行器。
 
-- `send_message(target, message, sender?, hop?)`
-- `read_updates(target, cursor?)`
-- `get_status(target)`
+它提供三个 MCP 工具：
 
-## Safety model
+- `send_message(target, message, sender?, hop?)`：向指定任务发送消息。
+- `read_updates(target, cursor?)`：增量读取任务消息。
+- `get_status(target)`：读取任务在桥接 App Server 中的状态。
 
-- Active work is extended through the owning desktop client; idle work starts a new turn.
-- Every message carries a sender, UUID, and bounded hop count.
-- If external task activity cannot be proven finished, the bridge refuses to create a new executor.
-- Isolated App Server mutation is disabled by default.
-- `read_updates` cursors are opaque and must be reused unchanged.
+## 工作原理
 
-On Windows, `src/desktop-ipc-client.mjs` uses the Codex desktop app's private `codex-ipc` coordination pipe to discover the thread owner and forward `thread-follower-steer-turn` or `thread-follower-start-turn`. This protocol is undocumented and may change in future desktop releases. The public Codex App Server transport remains the fallback backend.
+```text
+Codex 任务 A
+    │ 调用 MCP 工具
+    ▼
+Codex Thread Bridge
+    ├─ 查找目标任务的桌面所有者
+    ├─ 目标运行中：追加到当前轮次
+    └─ 目标空闲：启动一个新轮次
+    ▼
+Codex 任务 B
+```
 
-## Requirements
+桥接程序优先查找当前拥有目标 thread 的桌面客户端。目标正在运行时，它会向当前轮次追加消息；目标空闲时，才会启动新一轮。这样可以避免两个 App Server 同时续写同一个任务。
 
-- Node.js with the global `WebSocket` API
-- Codex CLI available as `codex`
-- Windows for desktop-owner forwarding
+## 安全设计
 
-## Setup
+- 每条桥接消息都包含发送者、UUID 和 hop 计数。
+- `maxAutomaticHops` 限制自动互相唤醒的最大轮数。
+- 无法确认目标任务已经空闲时，拒绝创建新执行器。
+- 默认禁止通过独立 App Server 修改桌面正在拥有的任务。
+- `read_updates` 返回的 cursor 是不透明值，必须原样传回。
+- 真实配置、运行日志、PID、会话记录和环境文件均被 Git 忽略。
 
-Copy the example configuration and replace its aliases, thread IDs, and rollout paths with local values:
+在 Windows 上，`src/desktop-ipc-client.mjs` 会通过 Codex 桌面应用的私有 `codex-ipc` 协调管道查找 thread 所有者，然后转发 `thread-follower-steer-turn` 或 `thread-follower-start-turn` 请求。
+
+> [!WARNING]
+> `codex-ipc` 所有者转发协议不是公开稳定接口，Codex Desktop 升级后可能发生变化。公开的 Codex App Server 接口仍作为后备传输层；升级桌面应用后应重新验证私有兼容层。
+
+## 环境要求
+
+- 支持全局 `WebSocket` API 的 Node.js
+- 命令行中可以使用 `codex`
+- Windows（桌面任务所有者转发功能）
+
+## 快速开始
+
+复制示例配置：
 
 ```powershell
 Copy-Item bridge.config.example.json bridge.config.json
+```
+
+编辑 `bridge.config.json`，把示例别名、thread ID 和 rollout 路径替换为本机真实值。不要提交这个文件。
+
+启动桥接 App Server 并运行测试：
+
+```powershell
 ./scripts/start-app-server.ps1
 npm test
 node src/cli.mjs status writer
 ```
 
-The startup script launches a hidden, loopback-only bridge App Server at `ws://127.0.0.1:47635`. Use `scripts/stop-app-server.ps1` to stop it.
+启动脚本会在 `ws://127.0.0.1:47635` 创建一个隐藏的、仅监听本机回环地址的 App Server。停止服务：
 
-Register the MCP server with Codex:
+```powershell
+./scripts/stop-app-server.ps1
+```
+
+## 注册 MCP Server
+
+使用 Codex CLI 注册：
 
 ```powershell
 codex mcp add codex_thread_bridge `
@@ -45,7 +80,7 @@ codex mcp add codex_thread_bridge `
   -- node C:/path/to/codex-thread-bridge/src/mcp-server.mjs
 ```
 
-Alternatively, add an equivalent entry to Codex configuration:
+也可以在 Codex 配置中添加等价配置：
 
 ```toml
 [mcp_servers.codex_thread_bridge]
@@ -54,21 +89,61 @@ args = ["C:/path/to/codex-thread-bridge/src/mcp-server.mjs"]
 env = { CODEX_BRIDGE_CONFIG = "C:/path/to/codex-thread-bridge/bridge.config.json" }
 ```
 
-## Configuration
+注册后，Codex 任务可以调用：
 
-Each target may be a thread ID string or an object containing `threadId` and `rolloutPath`. The rollout path is used as an external activity guard when the dedicated bridge App Server reports the thread as `notLoaded`.
+```text
+send_message(target="reviewer", message="请检查最新结果")
+read_updates(target="reviewer", cursor=null)
+get_status(target="reviewer")
+```
 
-The real `bridge.config.json`, runtime logs, PID files, generated schemas, environment files, and dependencies are ignored by Git. Do not commit session rollouts: they may contain full conversation history and local paths.
+## 配置说明
 
-## Notes
+每个 `targets` 项可以直接填写 thread ID，也可以使用包含以下字段的对象：
 
-- Codex desktop thread IDs are not OpenAI Agents API session IDs.
-- A `notLoaded` status describes the dedicated bridge App Server's local view; it does not prove that the desktop owner is absent.
-- MCP registration changes may require the desktop app to refresh or restart the affected MCP process.
-- Revalidate the private Windows IPC compatibility layer after Codex desktop upgrades.
+- `threadId`：Codex 桌面任务的 thread ID。
+- `rolloutPath`：对应的本机会话 JSONL 路径，用于从 App Server 之外确认任务是否已经结束。
 
-See the official [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server) and [MCP documentation](https://learn.chatgpt.com/docs/extend/mcp) for the supported public interfaces.
+关键安全配置：
 
-## License
+```json
+{
+  "safety": {
+    "maxAutomaticHops": 4,
+    "allowIsolatedSend": false
+  }
+}
+```
 
-MIT
+建议始终保持 `allowIsolatedSend: false`，除非可以确定没有桌面 App Server 拥有相同任务。
+
+## CLI 用法
+
+```powershell
+node src/cli.mjs status writer
+node src/cli.mjs read writer
+node src/cli.mjs send writer "请继续处理当前任务"
+node src/cli.mjs owner writer
+```
+
+`read` 命令返回的 cursor 可用于下一次增量读取：
+
+```powershell
+node src/cli.mjs read writer "上一次返回的完整 cursor"
+```
+
+不要使用自定义标签代替 cursor。
+
+## 注意事项
+
+- Codex 桌面 thread ID 与 OpenAI Agents API session ID 是两类不同标识，不能混用。
+- `notLoaded` 只表示专用桥接 App Server 没有加载该任务，不能证明桌面端没有拥有它。
+- 修改 MCP 注册后，可能需要让桌面应用刷新或重新启动对应 MCP 进程。
+- 不要提交 Codex rollout 文件；其中可能包含完整对话、任务 ID 和本地路径。
+- 上传公开仓库前，建议再次扫描用户名、绝对路径、thread ID、令牌和私钥。
+
+公开接口请参考官方 [Codex App Server 文档](https://learn.chatgpt.com/docs/app-server)和 [MCP 文档](https://learn.chatgpt.com/docs/extend/mcp)。
+
+## 许可证
+
+[MIT](LICENSE)
