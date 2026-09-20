@@ -1,0 +1,13 @@
+{
+  "name": "codex-thread-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "MCP bridge for messaging existing Codex App Server threads safely.",
+  "scripts": {
+    "test": "node test/bridge.test.mjs",
+    "status": "node src/cli.mjs status",
+    "mcp": "node src/mcp-server.mjs"
+  }
+}

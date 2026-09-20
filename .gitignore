@@ -1,0 +1,12 @@
+bridge.config.json
+work/
+node_modules/
+coverage/
+*.log
+*.pid
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+
